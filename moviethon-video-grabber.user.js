@@ -21,6 +21,9 @@
     let storedAuth = null;
     let epPanelVisible = true;
     let activeKeydownHandler = null;
+    let subtitleTrackBlobs = [];
+    let subtitleCueHandler = null;
+    let subtitlePollTimer = null;
 
     let meta = {
         subjectId: null,
@@ -578,11 +581,12 @@
         if (playData.hls && playData.hls.length > 0) {
             captionFormat = "HLS";
             captionId = playData.hls[0].id;
+        } else if (playData.streams && playData.streams.length > 0) {
+            captionFormat = "MP4";
+            captionId = playData.streams[0].id;
         } else if (playData.dash && playData.dash.length > 0) {
             captionFormat = "MP4";
             captionId = playData.dash[0].id;
-        } else if (playData.streams && playData.streams.length > 0) {
-            captionId = playData.streams[0].id;
         }
 
         if (!captionId) return;
@@ -1150,9 +1154,9 @@
         showControlsUI();
 
         /* ─── Subtitle management (research-backed implementation) ─── */
-        var subtitleTrackBlobs = [];
-        var subtitleCueHandler = null;
-        var subtitlePollTimer = null;
+        subtitleTrackBlobs = [];
+        subtitleCueHandler = null;
+        subtitlePollTimer = null;
 
         /* Initialize subtitle manager with localStorage-backed language selection */
         var subManager = createSubtitleManager();
