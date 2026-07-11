@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         MovieThon Video Grabber
 // @namespace    https://netfilm.world/
-// @version      2.2
+// @version      2.5
 // @description  Capture CDN video URLs from netfilm.world and play in a clean overlay player with custom controls and episode switcher
 // @author       moviethon-tools
 // @match        *://netfilm.world/*
@@ -435,6 +435,12 @@
                     var clone = response.clone();
                     clone.json().then(function(data) {
                         if (data && data.data && (data.data.dash || data.data.hls || data.data.streams)) {
+                            var seMatch = url.match(/[?&]se=([^&]+)/);
+                            var epMatch = url.match(/[?&]ep=([^&]+)/);
+                            if (seMatch && epMatch) {
+                                meta.curSe = parseInt(seMatch[1], 10);
+                                meta.curEp = parseInt(epMatch[1], 10);
+                            }
                             captureSources(data.data);
                         }
                     }).catch(function() {});
@@ -476,6 +482,12 @@
                         if (xhr._mtUrl.indexOf("/subject/play") !== -1) {
                             var data = JSON.parse(xhr.responseText);
                             if (data && data.data && (data.data.dash || data.data.hls || data.data.streams)) {
+                                var seMatch = xhr._mtUrl.match(/[?&]se=([^&]+)/);
+                                var epMatch = xhr._mtUrl.match(/[?&]ep=([^&]+)/);
+                                if (seMatch && epMatch) {
+                                    meta.curSe = parseInt(seMatch[1], 10);
+                                    meta.curEp = parseInt(epMatch[1], 10);
+                                }
                                 captureSources(data.data);
                             }
                         }
@@ -996,7 +1008,33 @@
         }
 
         sel.addEventListener("change", function() { loadSource(this.value, currentPlayData); });
-        loadSource(sel.value, currentPlayData);
+
+        var pData = null;
+        if (meta.subjectId) {
+            try {
+                var saved = localStorage.getItem("mt_progress_" + meta.subjectId);
+                if (saved) pData = JSON.parse(saved);
+            } catch(e) {}
+        }
+
+        var needsSwitch = false;
+        if (pData && pData.se && pData.ep && isSeries) {
+            if (pData.se !== meta.curSe || pData.ep !== meta.curEp) {
+                needsSwitch = true;
+            }
+        }
+
+        if (pData && pData.time) {
+            video._mtPendingSeek = pData.time;
+        }
+
+        if (needsSwitch) {
+            setTimeout(function() {
+                switchToEpisode(pData.se, pData.ep);
+            }, 0);
+        } else {
+            loadSource(sel.value, currentPlayData);
+        }
 
         /* ─── Custom playback controls ─── */
         var playBtn = playerOverlay.querySelector("#mt-play-btn");
@@ -1068,6 +1106,17 @@
                     progressBuffered.style.width = bufPct + "%";
                 }
             } catch(e) {}
+
+            if (meta.subjectId && cur > 5) {
+                var lastSaved = video._mtLastSaved || 0;
+                if (Math.abs(cur - lastSaved) > 5 || video.paused || video.ended) {
+                    try {
+                        var pData = { time: cur, se: meta.curSe, ep: meta.curEp };
+                        localStorage.setItem("mt_progress_" + meta.subjectId, JSON.stringify(pData));
+                        video._mtLastSaved = cur;
+                    } catch(e) {}
+                }
+            }
         }
 
         /* Progress bar scrubbing */
@@ -1394,6 +1443,10 @@
             clearSubtitleTrack();
             if (subState.captions.length > 0) {
                 setTimeout(applySubtitles, 300);
+            }
+            if (video._mtPendingSeek) {
+                video.currentTime = video._mtPendingSeek;
+                video._mtPendingSeek = 0;
             }
         });
 
@@ -1746,6 +1799,12 @@
         if (playerOverlay) {
             var video = playerOverlay.querySelector("#mt-video");
             if (video) {
+                if (meta.subjectId && video.currentTime > 5) {
+                    try {
+                        var pData = { time: video.currentTime, se: meta.curSe, ep: meta.curEp };
+                        localStorage.setItem("mt_progress_" + meta.subjectId, JSON.stringify(pData));
+                    } catch(e) {}
+                }
                 video.pause();
                 video.removeAttribute("src");
                 video.load();
