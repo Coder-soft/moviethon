@@ -835,6 +835,11 @@
         if (playerOverlay) return;
         if (!captured) return;
 
+        /* Pause any existing background videos/audio on the page */
+        document.querySelectorAll("video, audio").forEach(function(media) {
+            try { media.pause(); } catch(e) {}
+        });
+
         injectStyles();
         hitPrePlayApis(captured);
 
@@ -1256,7 +1261,7 @@
 
             ov.innerHTML = cues.map(function(cue) {
                 return cue.text.split(/\r?\n/).filter(function(l) { return l.trim(); }).map(function(line) {
-                    return '<div class="mt-subtitle-line">' + escapeHtml(line) + '</div>';
+                    return '<div class="mt-subtitle-line">' + escapeHtml(line.replace(/<[^>]+>/g, "")) + '</div>';
                 }).join("");
             }).join("");
 
