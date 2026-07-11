@@ -218,6 +218,80 @@
             });
     }
 
+    /* ─── Language mapping for subtitle persistence ─── */
+    var LANGUAGE_MAP = {
+        "English": "en", "中文(简体)": "zh", "中文": "zh", "日本語": "ja",
+        "한국어": "ko", "Français": "fr", "Deutsch": "de", "Español": "es",
+        "Italiano": "it", "Português": "pt", "Русский": "ru", "العربية": "ar",
+        "हिन्दी": "hi", "ภาษาไทย": "th", "Bahasa Indonesia": "id", "Việt Nam": "vi",
+        "Türkçe": "tr", "Nederlands": "nl", "Polski": "pl",
+    };
+
+    function getLangCode(lanName) {
+        return LANGUAGE_MAP[lanName] || (lanName || "").toLowerCase().replace(/[^a-z]/g, "").slice(0, 4) || "unk";
+    }
+
+    function buildSubtitleList(captions) {
+        var list = [{ en: "Off", html: "Off", name: "Off", url: "", lan: "off", _format: "", default: false }];
+        captions.forEach(function(c, i) {
+            var lan = getLangCode(c.lanName);
+            list.push({
+                en: c.lanName,
+                html: c.lanName,
+                name: c.lanName,
+                url: c.url,
+                _format: c.format || "",
+                lan: lan,
+                default: i === 0,
+            });
+        });
+        return list;
+    }
+
+    /* ─── Subtitle title manager: localStorage-backed language persistence (mn() equivalent) ─── */
+    function createSubtitleManager() {
+        var MAIN_KEY = "videoMainTitle";
+        var SUB_KEY = "videoSubTitle";
+        function save(k, v) { try { localStorage.setItem(k, v); } catch(e) {} }
+        function read(k) { try { return localStorage.getItem(k) || ""; } catch(e) { return ""; } }
+
+        function getDefaultMainTitles(list) {
+            if (!list || !list.length) return { lan: "off", html: "Off", url: "" };
+            var userLang = (navigator.language || "en").split("-")[0];
+            var saved = read(MAIN_KEY);
+            var preferred = saved || userLang || "en";
+            if (preferred === "off") return { lan: "off", html: "Off", url: "" };
+            var found = list.find(function(e) { return e.lan === preferred; })
+                || list.find(function(e) { return e.lan !== "off"; });
+            return found || { lan: "off", html: "Off", url: "" };
+        }
+
+        function getDefaultSubTitles(list) {
+            if (!list || !list.length) return { lan: "", html: "", url: "" };
+            var saved = read(SUB_KEY);
+            if (!saved) return { lan: "", html: "", url: "" };
+            var main = getDefaultMainTitles(list);
+            if (saved === main.lan || saved === "off") return { lan: "", html: "", url: "" };
+            var found = list.find(function(e) { return e.lan === saved; });
+            return found || { lan: "", html: "", url: "" };
+        }
+
+        function getDefaultTitles(list) {
+            var primary = getDefaultMainTitles(list);
+            var secondary = getDefaultSubTitles(list);
+            if (secondary.lan && secondary.lan === primary.lan) secondary = { lan: "", html: "", url: "" };
+            return { primary: primary, secondary: secondary };
+        }
+
+        return {
+            getDefaultTitles: getDefaultTitles,
+            saveMainTitlesSelect: function(lan) { save(MAIN_KEY, lan); },
+            saveSubTitlesSelect: function(lan) { save(SUB_KEY, lan); },
+            getDefaultMainTitles: getDefaultMainTitles,
+            getDefaultSubTitles: getDefaultSubTitles,
+        };
+    }
+
     /* ─── Inject styles (marquee-lamp cinema theme: navy + cream-gold) ─── */
     var stylesInjected = false;
     function injectStyles() {
@@ -325,12 +399,13 @@
             "@media (max-width:720px){#mt-ep-panel{position:absolute;right:0;top:0;bottom:0;width:78vw;max-width:300px;box-shadow:-8px 0 24px rgba(0,0,0,.5)}.mt-title{max-width:140px}}",
             "@media (max-width:480px){.mt-speed-select{display:none}.mt-time{font-size:11px}.mt-controls-row{gap:2px}}",
 
-            /* Subtitle overlay */
-            "#mt-subtitle-overlay{position:absolute;bottom:64px;left:0;right:0;text-align:center;pointer-events:none;z-index:3;padding:0 16px;transition:bottom .2s ease}",
-            "#mt-subtitle-overlay .mt-subtitle-line{display:inline-block;background:rgba(0,0,0,.65);color:#fff;font-size:1.15em;font-weight:500;line-height:1.45;padding:3px 10px;border-radius:4px;margin:2px 0;text-shadow:0 1px 2px rgba(0,0,0,.5);backdrop-filter:blur(2px);font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif}",
+            /* ─── Subtitle overlay ─── */
+            "#mt-subtitle-overlay{position:absolute;bottom:64px;left:0;right:0;text-align:center;pointer-events:none;z-index:3;padding:0 16px;transition:bottom .2s ease;display:flex;flex-direction:column;align-items:center}",
+            "#mt-subtitle-overlay .mt-subtitle-line{display:inline-block;background:rgba(0,0,0,.65);color:#fff;font-size:1.15em;font-weight:500;line-height:1.45;padding:3px 10px;border-radius:4px;margin:2px 0;text-shadow:0 1px 2px rgba(0,0,0,.5);backdrop-filter:blur(2px);font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;transition:color .15s ease,font-size .15s ease}",
             "#mt-subtitle-overlay .mt-subtitle-line:empty{display:none}",
-            "#mt-subtitle-overlay.mt-dual .mt-subtitle-line:first-child{font-size:.92em;opacity:.85}",
-            "#mt-subtitle-overlay.mt-dual .mt-subtitle-line:last-child{font-size:1.08em}",
+            "#mt-subtitle-overlay.mt-dual .mt-subtitle-line:nth-child(1){font-size:.95em;opacity:.85}",
+            "#mt-subtitle-overlay.mt-dual .mt-subtitle-line:nth-child(2){font-size:1.1em}",
+            "#mt-subtitle-overlay.mt-dual .mt-subtitle-line:nth-child(n+3){display:none!important}",
 
             "@media (prefers-reduced-motion:reduce){#mt-grabber-overlay,#mt-grabber-overlay *,#mt-grab-btn,#mt-status-dot{animation-duration:.001ms !important;animation-iteration-count:1 !important;transition-duration:.001ms !important}}",
         ].join("\n");
@@ -539,13 +614,7 @@
                 if (res && res.code === 0 && res.data && res.data.captions && res.data.captions.length) {
                     subState.captions = res.data.captions;
                     console.log("[MT Grabber] Captions available:", subState.captions.map(function(c) { return c.lanName; }).join(", "));
-                    /* Auto-select first available (usually English) */
-                    var eng = subState.captions.find(function(c) { return c.lanName === "English"; });
-                    if (eng) {
-                        subState.primary = eng;
-                    } else {
-                        subState.primary = subState.captions[0];
-                    }
+                    /* Initial selections will be set by subtitle manager when player opens */
                     /* Populate subtitle selectors if player is open */
                     if (playerOverlay) populateSubtitleSelectors();
                 } else {
@@ -1080,130 +1149,192 @@
         video.addEventListener("pause", showControlsUI);
         showControlsUI();
 
-        /* ─── Subtitle track management ─── */
-        var subtitleTrackBlobs = []; // Track blob URLs for cleanup
+        /* ─── Subtitle management (research-backed implementation) ─── */
+        var subtitleTrackBlobs = [];
         var subtitleCueHandler = null;
+        var subtitlePollTimer = null;
+
+        /* Initialize subtitle manager with localStorage-backed language selection */
+        var subManager = createSubtitleManager();
+        var subList = buildSubtitleList(subState.captions);
+        var defaultTitles = subManager.getDefaultTitles(subList);
+        if (defaultTitles.primary && defaultTitles.primary.lan !== "off") {
+            subState.primary = subState.captions.find(function(c) {
+                return getLangCode(c.lanName) === defaultTitles.primary.lan;
+            }) || null;
+        } else {
+            subState.primary = null;
+        }
+        if (defaultTitles.secondary && defaultTitles.secondary.lan) {
+            subState.secondary = subState.captions.find(function(c) {
+                return getLangCode(c.lanName) === defaultTitles.secondary.lan;
+            }) || null;
+        } else {
+            subState.secondary = null;
+        }
 
         function clearSubtitleTrack() {
-            /* Remove existing metadata track and overlay content */
             var oldTrack = video.querySelector("track[data-mt-subtitle]");
             if (oldTrack) { oldTrack.remove(); }
             subtitleTrackBlobs.forEach(function(b) { try { URL.revokeObjectURL(b); } catch(e) {} });
             subtitleTrackBlobs = [];
             var ov = document.getElementById("mt-subtitle-overlay");
-            if (ov) ov.innerHTML = "";
-            if (ov) ov.classList.remove("mt-dual");
+            if (ov) { ov.innerHTML = ""; ov.classList.remove("mt-dual"); }
+        }
+
+        function escapeHtml(str) {
+            var d = document.createElement("div");
+            d.appendChild(document.createTextNode(str));
+            return d.innerHTML;
+        }
+
+        /* ─── hideExtraSubtitles() equivalent: rAF polling ─── */
+        function hideExtraSubtitleLines() {
+            var ov = document.getElementById("mt-subtitle-overlay");
+            if (!ov) return;
+            var activeCount = (subState.primary ? 1 : 0) + (subState.secondary ? 1 : 0);
+            if (activeCount === 0) return;
+            var retries = 0;
+            var MAX_RETRIES = 10;
+            if (subtitlePollTimer) { cancelAnimationFrame(subtitlePollTimer); }
+            (function poll() {
+                try {
+                    var lines = ov.querySelectorAll(".mt-subtitle-line");
+                    if (lines.length > activeCount) {
+                        for (var i = lines.length - 1; i >= activeCount; i--) {
+                            lines[i].style.display = "none";
+                        }
+                    }
+                    if (lines.length <= activeCount || retries >= MAX_RETRIES) {
+                        subtitlePollTimer = null;
+                        return;
+                    }
+                    retries++;
+                    subtitlePollTimer = requestAnimationFrame(poll);
+                } catch(e) { subtitlePollTimer = null; }
+            })();
+        }
+
+        /* ─── Render subtitle overlay from cues (subtitleBeforeUpdate-equivalent interception) ─── */
+        function renderSubtitleCues(cues, ov) {
+            if (!cues || cues.length === 0) { ov.innerHTML = ""; return; }
+
+            /* Strip BOM from cue text */
+            cues.forEach(function(cue) {
+                if (cue.text && typeof cue.text === "string") {
+                    cue.text = cue.text.replace(/^\uFEFF/, "").replace(/^[\xEF\xBB\xBF]+/, "");
+                }
+            });
+
+            /* For dual subtitles, trim excess cues and ensure ordering */
+            var primary = subState.primary;
+            var secondary = subState.secondary;
+            var activeCount = (primary ? 1 : 0) + (secondary ? 1 : 0);
+
+            if (activeCount > 0 && cues.length > activeCount) {
+                var trimmed = cues.slice(0, activeCount);
+                cues.splice(0, cues.length, ...trimmed);
+            }
+
+            if (activeCount === 2 && cues.length >= 2 && primary && secondary) {
+                var pCode = getLangCode(primary.lanName);
+                var sCode = getLangCode(secondary.lanName);
+                var firstHasPrimary = cues[0].text && cues[0].text.indexOf(pCode) >= 0;
+                var secondHasSecondary = cues[1].text && cues[1].text.indexOf(sCode) >= 0;
+                if (cues[0].text !== cues[1].text
+                    && !firstHasPrimary
+                    && secondHasSecondary) {
+                    var tmp = cues[0].text;
+                    cues[0].text = cues[1].text;
+                    cues[1].text = tmp;
+                }
+            }
+
+            ov.innerHTML = cues.map(function(cue) {
+                return cue.text.split(/\r?\n/).filter(function(l) { return l.trim(); }).map(function(line) {
+                    return '<div class="mt-subtitle-line">' + escapeHtml(line) + '</div>';
+                }).join("");
+            }).join("");
+
+            /* Schedule cleanup of extra lines */
+            if (subtitlePollTimer) { cancelAnimationFrame(subtitlePollTimer); }
+            subtitlePollTimer = requestAnimationFrame(function() { hideExtraSubtitleLines(); });
         }
 
         function applySubtitles() {
             clearSubtitleTrack();
             var ov = document.getElementById("mt-subtitle-overlay");
             if (!ov) return;
-
             var primary = subState.primary;
             var secondary = subState.secondary;
-
             if (!primary && !secondary) return;
-
-            /* Determine which subtitle URLs to load */
             var urls = [];
             if (primary) urls.push(primary.url);
             if (secondary) urls.push(secondary.url);
-
             if (secondary) ov.classList.add("mt-dual");
+            else ov.classList.remove("mt-dual");
 
-            /* Fetch all subtitle files, convert to VTT, then load */
-            Promise.all(urls.map(function(url) { return fetchAndConvertSubtitle(url).catch(function() { return ""; }); }))
-                .then(function(vttTexts) {
-                    var vttResult;
-                    if (vttTexts.length === 2 && vttTexts[0] && vttTexts[1]) {
-                        vttResult = mergeDualSubtitles(vttTexts[0], vttTexts[1]);
-                    } else if (vttTexts.length >= 1 && vttTexts[0]) {
-                        vttResult = vttTexts[0];
-                    } else {
-                        return; /* Failed to load any subtitle */
-                    }
-
-                    if (!vttResult) return;
-
-                    var blobUrl = vttToBlob(vttResult);
-                    subtitleTrackBlobs.push(blobUrl);
-
-                    /* Create metadata track (not rendered by browser) */
-                    var track = document.createElement("track");
-                    track.setAttribute("data-mt-subtitle", "");
-                    track.kind = "metadata";
-                    track.src = blobUrl;
-                    track.label = primary ? primary.lanName : "subtitles";
-                    track.track.mode = "hidden";
-                    video.appendChild(track);
-
-                    /* Set up cue change handler */
-                    if (subtitleCueHandler) {
-                        video.removeEventListener("cuechange", subtitleCueHandler);
-                    }
-
-                    var textTrack = track.track;
-                    subtitleCueHandler = function() {
-                        var cues = textTrack && textTrack.activeCues ? Array.from(textTrack.activeCues) : [];
-                        if (cues.length === 0) {
-                            ov.innerHTML = "";
-                            return;
-                        }
-                        ov.innerHTML = cues.map(function(cue) {
-                            return cue.text.split("\n").filter(function(l) { return l.trim(); }).map(function(line) {
-                                return '<div class="mt-subtitle-line">' + escapeHtml(line) + '</div>';
-                            }).join("");
-                        }).join("");
-                    };
-                    textTrack.addEventListener("cuechange", subtitleCueHandler);
-
-                    /* Also trigger initial render if video is already playing */
-                    if (!video.paused) {
-                        setTimeout(function() { textTrack.dispatchEvent(new Event("cuechange")); }, 100);
-                    }
-                })
-                .catch(function(err) {
-                    console.log("[MT Grabber] Subtitle load error:", err);
-                });
-        }
-
-        function escapeHtml(str) {
-            var div = document.createElement("div");
-            div.appendChild(document.createTextNode(str));
-            return div.innerHTML;
+            Promise.all(urls.map(function(url) {
+                return fetchAndConvertSubtitle(url).catch(function() { return ""; });
+            })).then(function(vttTexts) {
+                var vttResult;
+                if (vttTexts.length === 2 && vttTexts[0] && vttTexts[1]) {
+                    vttResult = mergeDualSubtitles(vttTexts[0], vttTexts[1]);
+                } else if (vttTexts.length >= 1 && vttTexts[0]) {
+                    vttResult = vttTexts[0];
+                } else {
+                    return;
+                }
+                if (!vttResult) return;
+                var blobUrl = vttToBlob(vttResult);
+                subtitleTrackBlobs.push(blobUrl);
+                var track = document.createElement("track");
+                track.setAttribute("data-mt-subtitle", "");
+                track.kind = "metadata";
+                track.src = blobUrl;
+                track.label = primary ? primary.lanName : "subtitles";
+                track.track.mode = "hidden";
+                video.appendChild(track);
+                if (subtitleCueHandler) {
+                    video.removeEventListener("cuechange", subtitleCueHandler);
+                }
+                var textTrack = track.track;
+                subtitleCueHandler = function() {
+                    var cues = textTrack && textTrack.activeCues
+                        ? Array.from(textTrack.activeCues)
+                        : [];
+                    renderSubtitleCues(cues, ov);
+                };
+                textTrack.addEventListener("cuechange", subtitleCueHandler);
+                if (!video.paused) {
+                    setTimeout(function() { textTrack.dispatchEvent(new Event("cuechange")); }, 100);
+                }
+            }).catch(function(err) {
+                console.log("[MT Grabber] Subtitle load error:", err);
+            });
         }
 
         function populateSubtitleSelectors() {
             var subSel = playerOverlay.querySelector("#mt-subtitle-select");
             var dualSel = playerOverlay.querySelector("#mt-dual-subtitle-select");
             if (!subSel || !dualSel) return;
-
-            /* Remember current selections */
-            var curPrimary = subSel.value;
-            var curDual = dualSel.value;
-
             subSel.innerHTML = '<option value="">Subs: Off</option>';
             dualSel.innerHTML = '<option value="">Dubs: Off</option>';
-
-            subState.captions.forEach(function(c, i) {
+            subState.captions.forEach(function(c) {
                 var opt1 = document.createElement("option");
                 opt1.value = c.lanName;
                 opt1.textContent = c.lanName;
                 subSel.appendChild(opt1);
-
                 var opt2 = document.createElement("option");
                 opt2.value = c.lanName;
                 opt2.textContent = c.lanName;
                 dualSel.appendChild(opt2);
             });
-
-            /* Restore selections if possible */
             if (subState.primary) subSel.value = subState.primary.lanName;
             if (subState.secondary) dualSel.value = subState.secondary.lanName;
         }
 
-        /* ─── Wire subtitle selectors ─── */
+        /* ─── Wire subtitle selectors with localStorage persistence ─── */
         var subSel = playerOverlay.querySelector("#mt-subtitle-select");
         var dualSel = playerOverlay.querySelector("#mt-dual-subtitle-select");
 
@@ -1212,12 +1343,13 @@
                 var lan = this.value;
                 if (!lan) {
                     subState.primary = null;
+                    subManager.saveMainTitlesSelect("off");
                 } else {
                     var found = subState.captions.find(function(c) { return c.lanName === lan; });
                     subState.primary = found || null;
+                    subManager.saveMainTitlesSelect(getLangCode(lan));
                 }
                 applySubtitles();
-                /* Don't auto-hide controls when changing subtitles */
                 showControlsUI();
             });
         }
@@ -1227,36 +1359,41 @@
                 var lan = this.value;
                 if (!lan) {
                     subState.secondary = null;
+                    subManager.saveSubTitlesSelect("");
                 } else {
                     var found = subState.captions.find(function(c) { return c.lanName === lan; });
                     subState.secondary = found || null;
+                    if (subState.secondary && subState.primary &&
+                        subState.secondary.lanName === subState.primary.lanName) {
+                        subState.secondary = null;
+                        dualSel.value = "";
+                        subManager.saveSubTitlesSelect("");
+                    } else {
+                        subManager.saveSubTitlesSelect(getLangCode(lan));
+                    }
                 }
                 applySubtitles();
                 showControlsUI();
             });
         }
 
-        /* Populate selectors if captions already fetched */
         if (subState.captions.length > 0) {
             populateSubtitleSelectors();
         }
 
-        /* Re-apply subtitles when video loads a new source */
         video.addEventListener("loadedmetadata", function() {
-            /* Clear stale subtitle track, re-apply after short delay */
             clearSubtitleTrack();
             if (subState.captions.length > 0) {
                 setTimeout(applySubtitles, 300);
             }
         });
 
-        /* ─── Cycle subtitle (keyboard shortcut 'c') ─── */
+        /* ─── Cycle subtitle (keyboard shortcut 'c') with persistence ─── */
         function cycleSubtitle() {
             var all = subState.captions;
             if (!all || !all.length) return;
             var subSel = playerOverlay.querySelector("#mt-subtitle-select");
             if (!subSel) return;
-
             var opts = Array.from(subSel.options);
             var cur = subSel.selectedIndex;
             var next = (cur + 1) % opts.length;
@@ -1610,10 +1747,11 @@
                 document.removeEventListener("keydown", activeKeydownHandler);
                 activeKeydownHandler = null;
             }
-            /* Clean up subtitle blobs */
+            /* Clean up subtitle resources */
+            if (subtitlePollTimer) { cancelAnimationFrame(subtitlePollTimer); subtitlePollTimer = null; }
             subtitleTrackBlobs.forEach(function(b) { try { URL.revokeObjectURL(b); } catch(e) {} });
             subtitleTrackBlobs = [];
-            if (subtitleCueHandler) {
+            if (subtitleCueHandler && video) {
                 video.removeEventListener("cuechange", subtitleCueHandler);
                 subtitleCueHandler = null;
             }
