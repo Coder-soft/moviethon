@@ -32,6 +32,17 @@
     };
 
     var lastDetailUrl = "";
+
+    /* ─── Subtitle state ─── */
+    var subState = {
+        captions: [],       // [{lanName, url, format}] from caption API
+        primary: null,      // {lanName, url, format} or null = off
+        secondary: null,    // {lanName, url, format} or null = off
+        streamId: null,     // ID used for caption API fetch
+        fetched: false,     // Whether caption API has been called
+        overlayEl: null,    // Subtitle render overlay div
+    };
+
     function mi(n) {
         var icons = {
             "smart_display": '<svg viewBox="0 0 24 24" width="1em" height="1em" fill="currentColor"><path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm-2 14.5v-9l6 4.5-6 4.5z"/></svg>',
@@ -49,6 +60,162 @@
             "lock": '<svg viewBox="0 0 24 24" width="1em" height="1em" fill="currentColor"><path d="M18 8h-1V6c0-2.76-2.24-5-5-5S7 3.24 7 6v2H6c-1.1 0-2 .9-2 2v10c0 1.1.9 2 2 2h12c1.1 0 2-.9 2-2V10c0-1.1-.9-2-2-2zm-6 9c-1.1 0-2-.9-2-2s.9-2 2-2 2 .9 2 2-.9 2-2 2zm3.1-9H8.9V6c0-1.71 1.39-3.1 3.1-3.1s3.1 1.39 3.1 3.1v2z"/></svg>',
         };
         return icons[n] || n;
+    }
+
+    /* ─── Subtitle format converters (SRT→VTT, ASS→VTT), VTT utilities ─── */
+    function srtToVtt(srt) {
+        return "WEBVTT\r\n\r\n".concat(
+            srt
+                .replace(/(\d\d:\d\d:\d\d)[,.](\d+)/g, function(m, time, ms) {
+                    var padded = ms.slice(0, 3);
+                    if (ms.length === 1) padded = ms + "00";
+                    if (ms.length === 2) padded = ms + "0";
+                    return time + "," + padded;
+                })
+                .replace(/\{\\([ibu])\}/g, "</$1>")
+                .replace(/\{\\([ibu])1\}/g, "<$1>")
+                .replace(/\{([ibu])\}/g, "<$1>")
+                .replace(/\{\/([ibu])\}/g, "</$1>")
+                .replace(/(\d\d:\d\d:\d\d),(\d\d\d)/g, "$1.$2")
+                .replace(/\{[\s\S]*?\}/g, "")
+                .concat("\r\n\r\n")
+        );
+    }
+
+    function assToVtt(ass) {
+        var dialogueRegex = RegExp(
+            "Dialogue:\\s\\d," +
+            "(\\d+:\\d\\d:\\d\\d.\\d\\d)," +
+            "(\\d+:\\d\\d:\\d\\d.\\d\\d)," +
+            "([^,]*),([^,]*)," +
+            "(?:[^,]*,){4}" +
+            "([\\s\\S]*)$",
+            "i"
+        );
+        function formatTimestamp(time) {
+            if (!time) return "00:00:00.000";
+            return time.split(/[:.]/).map(function(part, idx, arr) {
+                if (idx === arr.length - 1) {
+                    if (part.length === 1) return "." + part + "00";
+                    if (part.length === 2) return "." + part + "0";
+                    return "." + part;
+                }
+                if (part.length === 1) return (idx === 0 ? "0" : ":0") + part;
+                return idx === 0 ? part : ":" + part;
+            }).join("");
+        }
+        return "WEBVTT " + ass
+            .split(/\r?\n/)
+            .map(function(line) {
+                var match = line.match(dialogueRegex);
+                if (!match) return null;
+                return {
+                    start: formatTimestamp(match[1].trim()),
+                    end: formatTimestamp(match[2].trim()),
+                    text: match[5]
+                        .replace(/\{[\s\S]*?\}/g, "")
+                        .replace(/(\\N)/g, "\n")
+                        .trim()
+                        .split(/\r?\n/)
+                        .map(function(f) { return f.trim(); })
+                        .join("\n")
+                };
+            })
+            .filter(function(d) { return d; })
+            .map(function(d, idx) {
+                return d ? (idx + 1) + "\n" + d.start + " --> " + d.end + "\n" + d.text : "";
+            })
+            .filter(function(d) { return d.trim(); })
+            .join("\n\n");
+    }
+
+    function vttToBlob(vtt) {
+        return URL.createObjectURL(new Blob([vtt], { type: "text/vtt" }));
+    }
+
+    /* ─── Parse VTT string into cue objects ─── */
+    function parseVttCues(vtt) {
+        var cues = [];
+        var lines = vtt.split(/\r?\n/);
+        var current = null;
+        for (var i = 0; i < lines.length; i++) {
+            var line = lines[i].trim();
+            if (!line || line === "WEBVTT" || line.indexOf("WEBVTT") === 0 || /^\d+$/.test(line)) continue;
+            if (line.indexOf("-->") !== -1) {
+                if (current) cues.push(current);
+                var parts = line.split("-->");
+                current = { start: parseVttTime(parts[0].trim()), end: parseVttTime(parts[1].trim()), text: "" };
+            } else if (current && line.indexOf(":") === -1) {
+                current.text += (current.text ? "\n" : "") + line;
+            }
+        }
+        if (current) cues.push(current);
+        return cues;
+    }
+
+    function parseVttTime(t) {
+        t = t.replace(/,/g, ".");
+        var parts = t.split(":");
+        if (parts.length === 3) return parseInt(parts[0], 10) * 3600 + parseInt(parts[1], 10) * 60 + parseFloat(parts[2]);
+        if (parts.length === 2) return parseInt(parts[0], 10) * 60 + parseFloat(parts[1]);
+        return parseFloat(parts[0]) || 0;
+    }
+
+    function formatVttTime(sec) {
+        if (!isFinite(sec) || sec < 0) sec = 0;
+        var h = Math.floor(sec / 3600);
+        var m = Math.floor((sec % 3600) / 60);
+        var s = sec % 60;
+        return (h < 10 ? "0" : "") + h + ":" + (m < 10 ? "0" : "") + m + ":" + (s < 10 ? "0" : "") + s.toFixed(3);
+    }
+
+    /* ─── Serialize cue array back to VTT ─── */
+    function cuesToVtt(cues) {
+        if (!cues || !cues.length) return "";
+        return "WEBVTT\n\n" + cues.map(function(c, i) {
+            return (i + 1) + "\n" + formatVttTime(c.start) + " --> " + formatVttTime(c.end) + "\n" + c.text;
+        }).join("\n\n");
+    }
+
+    /* ─── Merge two VTT tracks for dual subtitles ─── */
+    function mergeDualSubtitles(vtt1, vtt2) {
+        if (!vtt1) return vtt2 || "";
+        if (!vtt2) return vtt1 || "";
+        var c1 = parseVttCues(vtt1);
+        var c2 = parseVttCues(vtt2);
+        var result = [];
+        var i = 0, j = 0;
+        while (i < c1.length || j < c2.length) {
+            var a = c1[i], b = c2[j];
+            if (!b) { result.push(a); i++; }
+            else if (!a) { result.push(b); j++; }
+            else if (a.end <= b.start) { result.push(a); i++; }
+            else if (b.end <= a.start) { result.push(b); j++; }
+            else {
+                result.push({
+                    start: Math.min(a.start, b.start),
+                    end: Math.max(a.end, b.end),
+                    text: a.text + "\n" + b.text
+                });
+                i++; j++;
+            }
+        }
+        return cuesToVtt(result);
+    }
+
+    /* ─── Fetch a subtitle URL, detect format, convert to VTT text ─── */
+    function fetchAndConvertSubtitle(url) {
+        return fetch(url)
+            .then(function(r) {
+                if (!r.ok) throw new Error("HTTP " + r.status);
+                return r.text();
+            })
+            .then(function(text) {
+                var ext = (url.split("?").shift().split(".").pop() || "").toLowerCase();
+                if (ext === "srt") return srtToVtt(text);
+                if (ext === "ass" || ext === "ssa") return assToVtt(text);
+                return text; // Already VTT or unknown
+            });
     }
 
     /* ─── Inject styles (marquee-lamp cinema theme: navy + cream-gold) ─── */
@@ -157,6 +324,13 @@
 
             "@media (max-width:720px){#mt-ep-panel{position:absolute;right:0;top:0;bottom:0;width:78vw;max-width:300px;box-shadow:-8px 0 24px rgba(0,0,0,.5)}.mt-title{max-width:140px}}",
             "@media (max-width:480px){.mt-speed-select{display:none}.mt-time{font-size:11px}.mt-controls-row{gap:2px}}",
+
+            /* Subtitle overlay */
+            "#mt-subtitle-overlay{position:absolute;bottom:64px;left:0;right:0;text-align:center;pointer-events:none;z-index:3;padding:0 16px;transition:bottom .2s ease}",
+            "#mt-subtitle-overlay .mt-subtitle-line{display:inline-block;background:rgba(0,0,0,.65);color:#fff;font-size:1.15em;font-weight:500;line-height:1.45;padding:3px 10px;border-radius:4px;margin:2px 0;text-shadow:0 1px 2px rgba(0,0,0,.5);backdrop-filter:blur(2px);font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif}",
+            "#mt-subtitle-overlay .mt-subtitle-line:empty{display:none}",
+            "#mt-subtitle-overlay.mt-dual .mt-subtitle-line:first-child{font-size:.92em;opacity:.85}",
+            "#mt-subtitle-overlay.mt-dual .mt-subtitle-line:last-child{font-size:1.08em}",
 
             "@media (prefers-reduced-motion:reduce){#mt-grabber-overlay,#mt-grabber-overlay *,#mt-grab-btn,#mt-status-dot{animation-duration:.001ms !important;animation-iteration-count:1 !important;transition-duration:.001ms !important}}",
         ].join("\n");
@@ -267,13 +441,13 @@
         sourceEntries = [];
 
         (data.streams || []).forEach(function(s) {
-            sourceEntries.push({ type: "MP4", res: s.resolutions, codec: "h264", url: s.url, vipLocked: s.vipLocked });
+            sourceEntries.push({ type: "MP4", res: s.resolutions, codec: "h264", url: s.url, vipLocked: s.vipLocked, streamId: s.id });
         });
         (data.hls || []).forEach(function(s) {
-            sourceEntries.push({ type: "HLS", res: s.resolutions, codec: "h264", url: s.url, signHeaderKey: s.signHeaderKey, signCookie: s.signCookie, vipLocked: s.vipLocked });
+            sourceEntries.push({ type: "HLS", res: s.resolutions, codec: "h264", url: s.url, signHeaderKey: s.signHeaderKey, signCookie: s.signCookie, vipLocked: s.vipLocked, streamId: s.id });
         });
         (data.dash || []).forEach(function(s) {
-            sourceEntries.push({ type: "DASH", res: s.resolutions, codec: s.codecName || "h264", url: s.url, signHeaderKey: s.signHeaderKey, signCookie: s.signCookie, prePlayApi: s.prePlayApi, vipLocked: s.vipLocked });
+            sourceEntries.push({ type: "DASH", res: s.resolutions, codec: s.codecName || "h264", url: s.url, signHeaderKey: s.signHeaderKey, signCookie: s.signCookie, prePlayApi: s.prePlayApi, vipLocked: s.vipLocked, streamId: s.id });
         });
 
         sourceEntries.sort(function(a, b) { return parseInt(b.res, 10) - parseInt(a.res, 10); });
@@ -288,6 +462,9 @@
 
         /* Refresh overlay if open */
         if (playerOverlay) refreshPlayerSources();
+
+        /* Trigger caption fetch for subtitles */
+        fetchCaptions(data);
     }
 
     /* ─── Fetch play API ─── */
@@ -312,6 +489,72 @@
 
         console.log("[MT Grabber] Fetching play API:", url.replace(storedAuth ? storedAuth : "", "[token]"));
         return fetch(url, { headers: headers }).then(function(r) { return r.json(); });
+    }
+
+    /* ─── Fetch caption/subtitle API ─── */
+    function fetchCaptions(playData) {
+        if (!playData) playData = captured;
+        if (!playData || !meta.subjectId) return;
+
+        /* Determine stream ID and format for caption API */
+        var captionFormat = "MP4";
+        var captionId = "";
+
+        if (playData.hls && playData.hls.length > 0) {
+            captionFormat = "HLS";
+            captionId = playData.hls[0].id;
+        } else if (playData.dash && playData.dash.length > 0) {
+            captionFormat = "MP4";
+            captionId = playData.dash[0].id;
+        } else if (playData.streams && playData.streams.length > 0) {
+            captionId = playData.streams[0].id;
+        }
+
+        if (!captionId) return;
+
+        subState.streamId = captionId;
+        subState.fetched = true;
+
+        var slug = location.pathname.split("/").filter(Boolean).pop() || "";
+        var base = /(localhost|10\.|h5-test)/i.test(location.origin)
+            ? "https://h5-api-test.aoneroom.com"
+            : location.origin;
+
+        var url = base + "/wefeed-h5api-bff/subject/caption"
+            + "?format=" + captionFormat
+            + "&id=" + encodeURIComponent(captionId)
+            + "&subjectId=" + encodeURIComponent(meta.subjectId)
+            + "&detailPath=" + encodeURIComponent(slug);
+
+        var headers = {
+            Accept: "application/json",
+            "X-Client-Info": JSON.stringify({ timezone: Intl.DateTimeFormat().resolvedOptions().timeZone }),
+        };
+        if (storedAuth) headers.Authorization = storedAuth;
+
+        console.log("[MT Grabber] Fetching captions...");
+        fetch(url, { headers: headers })
+            .then(function(r) { return r.json(); })
+            .then(function(res) {
+                if (res && res.code === 0 && res.data && res.data.captions && res.data.captions.length) {
+                    subState.captions = res.data.captions;
+                    console.log("[MT Grabber] Captions available:", subState.captions.map(function(c) { return c.lanName; }).join(", "));
+                    /* Auto-select first available (usually English) */
+                    var eng = subState.captions.find(function(c) { return c.lanName === "English"; });
+                    if (eng) {
+                        subState.primary = eng;
+                    } else {
+                        subState.primary = subState.captions[0];
+                    }
+                    /* Populate subtitle selectors if player is open */
+                    if (playerOverlay) populateSubtitleSelectors();
+                } else {
+                    console.log("[MT Grabber] No captions available");
+                }
+            })
+            .catch(function(err) {
+                console.log("[MT Grabber] Caption fetch error:", err);
+            });
     }
 
     /* ─── Hit prePlayApi ─── */
@@ -556,6 +799,7 @@
             '<div style="display:flex;flex:1;min-height:0">',
             '<div id="mt-video-wrap" style="flex:1;display:flex;align-items:center;justify-content:center;position:relative;min-width:0">',
             '<video id="mt-video" autoplay playsinline style="width:100%;height:100%;object-fit:contain;outline:none"></video>',
+            '<div id="mt-subtitle-overlay"></div>',
             '<div id="mt-loading">Loading…</div>',
             '<button id="mt-center-play" class="mt-center-play" title="Play">' + mi("play_arrow") + '</button>',
             /* Custom control bar */
@@ -578,6 +822,12 @@
             '</div>',
             '<select id="mt-speed-select" class="mt-select mt-speed-select" title="Playback speed">',
             '<option value="0.5">0.5×</option><option value="0.75">0.75×</option><option value="1" selected>1×</option><option value="1.25">1.25×</option><option value="1.5">1.5×</option><option value="2">2×</option>',
+            '</select>',
+            '<select id="mt-subtitle-select" class="mt-select mt-speed-select" title="Subtitles (c)" style="max-width:100px">',
+            '<option value="">Subs: Off</option>',
+            '</select>',
+            '<select id="mt-dual-subtitle-select" class="mt-select mt-speed-select" title="Dual subtitles" style="max-width:100px">',
+            '<option value="">Dubs: Off</option>',
             '</select>',
 '<button id="mt-pip-btn" class="mt-ctrl-btn" title="Picture-in-picture">' + mi("picture_in_picture_alt") + '</button>',
 '<button id="mt-fullscreen-btn" class="mt-ctrl-btn" title="Fullscreen (f)">' + mi("fullscreen") + '</button>',
@@ -830,6 +1080,190 @@
         video.addEventListener("pause", showControlsUI);
         showControlsUI();
 
+        /* ─── Subtitle track management ─── */
+        var subtitleTrackBlobs = []; // Track blob URLs for cleanup
+        var subtitleCueHandler = null;
+
+        function clearSubtitleTrack() {
+            /* Remove existing metadata track and overlay content */
+            var oldTrack = video.querySelector("track[data-mt-subtitle]");
+            if (oldTrack) { oldTrack.remove(); }
+            subtitleTrackBlobs.forEach(function(b) { try { URL.revokeObjectURL(b); } catch(e) {} });
+            subtitleTrackBlobs = [];
+            var ov = document.getElementById("mt-subtitle-overlay");
+            if (ov) ov.innerHTML = "";
+            if (ov) ov.classList.remove("mt-dual");
+        }
+
+        function applySubtitles() {
+            clearSubtitleTrack();
+            var ov = document.getElementById("mt-subtitle-overlay");
+            if (!ov) return;
+
+            var primary = subState.primary;
+            var secondary = subState.secondary;
+
+            if (!primary && !secondary) return;
+
+            /* Determine which subtitle URLs to load */
+            var urls = [];
+            if (primary) urls.push(primary.url);
+            if (secondary) urls.push(secondary.url);
+
+            if (secondary) ov.classList.add("mt-dual");
+
+            /* Fetch all subtitle files, convert to VTT, then load */
+            Promise.all(urls.map(function(url) { return fetchAndConvertSubtitle(url).catch(function() { return ""; }); }))
+                .then(function(vttTexts) {
+                    var vttResult;
+                    if (vttTexts.length === 2 && vttTexts[0] && vttTexts[1]) {
+                        vttResult = mergeDualSubtitles(vttTexts[0], vttTexts[1]);
+                    } else if (vttTexts.length >= 1 && vttTexts[0]) {
+                        vttResult = vttTexts[0];
+                    } else {
+                        return; /* Failed to load any subtitle */
+                    }
+
+                    if (!vttResult) return;
+
+                    var blobUrl = vttToBlob(vttResult);
+                    subtitleTrackBlobs.push(blobUrl);
+
+                    /* Create metadata track (not rendered by browser) */
+                    var track = document.createElement("track");
+                    track.setAttribute("data-mt-subtitle", "");
+                    track.kind = "metadata";
+                    track.src = blobUrl;
+                    track.label = primary ? primary.lanName : "subtitles";
+                    track.track.mode = "hidden";
+                    video.appendChild(track);
+
+                    /* Set up cue change handler */
+                    if (subtitleCueHandler) {
+                        video.removeEventListener("cuechange", subtitleCueHandler);
+                    }
+
+                    var textTrack = track.track;
+                    subtitleCueHandler = function() {
+                        var cues = textTrack && textTrack.activeCues ? Array.from(textTrack.activeCues) : [];
+                        if (cues.length === 0) {
+                            ov.innerHTML = "";
+                            return;
+                        }
+                        ov.innerHTML = cues.map(function(cue) {
+                            return cue.text.split("\n").filter(function(l) { return l.trim(); }).map(function(line) {
+                                return '<div class="mt-subtitle-line">' + escapeHtml(line) + '</div>';
+                            }).join("");
+                        }).join("");
+                    };
+                    textTrack.addEventListener("cuechange", subtitleCueHandler);
+
+                    /* Also trigger initial render if video is already playing */
+                    if (!video.paused) {
+                        setTimeout(function() { textTrack.dispatchEvent(new Event("cuechange")); }, 100);
+                    }
+                })
+                .catch(function(err) {
+                    console.log("[MT Grabber] Subtitle load error:", err);
+                });
+        }
+
+        function escapeHtml(str) {
+            var div = document.createElement("div");
+            div.appendChild(document.createTextNode(str));
+            return div.innerHTML;
+        }
+
+        function populateSubtitleSelectors() {
+            var subSel = playerOverlay.querySelector("#mt-subtitle-select");
+            var dualSel = playerOverlay.querySelector("#mt-dual-subtitle-select");
+            if (!subSel || !dualSel) return;
+
+            /* Remember current selections */
+            var curPrimary = subSel.value;
+            var curDual = dualSel.value;
+
+            subSel.innerHTML = '<option value="">Subs: Off</option>';
+            dualSel.innerHTML = '<option value="">Dubs: Off</option>';
+
+            subState.captions.forEach(function(c, i) {
+                var opt1 = document.createElement("option");
+                opt1.value = c.lanName;
+                opt1.textContent = c.lanName;
+                subSel.appendChild(opt1);
+
+                var opt2 = document.createElement("option");
+                opt2.value = c.lanName;
+                opt2.textContent = c.lanName;
+                dualSel.appendChild(opt2);
+            });
+
+            /* Restore selections if possible */
+            if (subState.primary) subSel.value = subState.primary.lanName;
+            if (subState.secondary) dualSel.value = subState.secondary.lanName;
+        }
+
+        /* ─── Wire subtitle selectors ─── */
+        var subSel = playerOverlay.querySelector("#mt-subtitle-select");
+        var dualSel = playerOverlay.querySelector("#mt-dual-subtitle-select");
+
+        if (subSel) {
+            subSel.addEventListener("change", function() {
+                var lan = this.value;
+                if (!lan) {
+                    subState.primary = null;
+                } else {
+                    var found = subState.captions.find(function(c) { return c.lanName === lan; });
+                    subState.primary = found || null;
+                }
+                applySubtitles();
+                /* Don't auto-hide controls when changing subtitles */
+                showControlsUI();
+            });
+        }
+
+        if (dualSel) {
+            dualSel.addEventListener("change", function() {
+                var lan = this.value;
+                if (!lan) {
+                    subState.secondary = null;
+                } else {
+                    var found = subState.captions.find(function(c) { return c.lanName === lan; });
+                    subState.secondary = found || null;
+                }
+                applySubtitles();
+                showControlsUI();
+            });
+        }
+
+        /* Populate selectors if captions already fetched */
+        if (subState.captions.length > 0) {
+            populateSubtitleSelectors();
+        }
+
+        /* Re-apply subtitles when video loads a new source */
+        video.addEventListener("loadedmetadata", function() {
+            /* Clear stale subtitle track, re-apply after short delay */
+            clearSubtitleTrack();
+            if (subState.captions.length > 0) {
+                setTimeout(applySubtitles, 300);
+            }
+        });
+
+        /* ─── Cycle subtitle (keyboard shortcut 'c') ─── */
+        function cycleSubtitle() {
+            var all = subState.captions;
+            if (!all || !all.length) return;
+            var subSel = playerOverlay.querySelector("#mt-subtitle-select");
+            if (!subSel) return;
+
+            var opts = Array.from(subSel.options);
+            var cur = subSel.selectedIndex;
+            var next = (cur + 1) % opts.length;
+            subSel.selectedIndex = next;
+            subSel.dispatchEvent(new Event("change"));
+        }
+
         /* ─── Episode panel ─── */
         if (isSeries) {
             buildEpisodeView();
@@ -861,6 +1295,7 @@
             else if (e.key === "ArrowDown") { e.preventDefault(); video.volume = Math.max(0, video.volume - 0.1); showControlsUI(); }
             else if (e.key === "m" || e.key === "M") { toggleMute(); showControlsUI(); }
             else if (e.key === "f" || e.key === "F") { toggleFullscreen(); showControlsUI(); }
+            else if (e.key === "c" || e.key === "C") { cycleSubtitle(); showControlsUI(); }
         };
         document.addEventListener("keydown", activeKeydownHandler);
     }
@@ -868,9 +1303,9 @@
     /* ─── Get playable sources from arbitrary play data ─── */
     function getPlayableSourcesFrom(playData) {
         var all = [];
-        (playData.streams || []).forEach(function(s) { all.push({ type: "MP4", res: s.resolutions, codec: "h264", url: s.url, vipLocked: s.vipLocked }); });
-        (playData.hls || []).forEach(function(s) { all.push({ type: "HLS", res: s.resolutions, codec: "h264", url: s.url, signHeaderKey: s.signHeaderKey, signCookie: s.signCookie, vipLocked: s.vipLocked }); });
-        (playData.dash || []).forEach(function(s) { all.push({ type: "DASH", res: s.resolutions, codec: s.codecName || "h264", url: s.url, signHeaderKey: s.signHeaderKey, signCookie: s.signCookie, prePlayApi: s.prePlayApi, vipLocked: s.vipLocked }); });
+        (playData.streams || []).forEach(function(s) { all.push({ type: "MP4", res: s.resolutions, codec: "h264", url: s.url, vipLocked: s.vipLocked, streamId: s.id }); });
+        (playData.hls || []).forEach(function(s) { all.push({ type: "HLS", res: s.resolutions, codec: "h264", url: s.url, signHeaderKey: s.signHeaderKey, signCookie: s.signCookie, vipLocked: s.vipLocked, streamId: s.id }); });
+        (playData.dash || []).forEach(function(s) { all.push({ type: "DASH", res: s.resolutions, codec: s.codecName || "h264", url: s.url, signHeaderKey: s.signHeaderKey, signCookie: s.signCookie, prePlayApi: s.prePlayApi, vipLocked: s.vipLocked, streamId: s.id }); });
         all.sort(function(a, b) { return parseInt(b.res, 10) - parseInt(a.res, 10); });
         var mp4 = all.filter(function(s) { return s.type === "MP4" && !s.vipLocked; });
         if (!mp4.length) mp4 = all.filter(function(s) { return s.type === "MP4"; });
@@ -1174,6 +1609,13 @@
             if (activeKeydownHandler) {
                 document.removeEventListener("keydown", activeKeydownHandler);
                 activeKeydownHandler = null;
+            }
+            /* Clean up subtitle blobs */
+            subtitleTrackBlobs.forEach(function(b) { try { URL.revokeObjectURL(b); } catch(e) {} });
+            subtitleTrackBlobs = [];
+            if (subtitleCueHandler) {
+                video.removeEventListener("cuechange", subtitleCueHandler);
+                subtitleCueHandler = null;
             }
             var overlayEl = playerOverlay;
             overlayEl.classList.add("mt-closing");
