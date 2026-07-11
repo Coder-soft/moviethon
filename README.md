@@ -73,11 +73,3 @@ The script intercepts the `/subject/play` API call that netfilm.world makes to f
 2. Loads the selected source — MP4 directly via `<video>`, HLS via HLS.js, DASH via dash.js
 3. Injects the correct `Referer` and `signHeaderKey` headers for CDN authentication
 
-## Files
-
-| File | Purpose |
-|------|---------|
-| `moviethon-video-grabber.user.js` | The Tampermonkey userscript |
-| `VIDEO_CDN_LOAD_ANALYSIS.md` | CDN architecture analysis |
-| `PREVIEW_TIMER_ANALYSIS.md` | Preview timer analysis |
-| `moviethon-timer-control.user.js` | Companion script for preview timer override |
