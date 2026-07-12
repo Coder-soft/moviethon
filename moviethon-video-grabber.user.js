@@ -3,7 +3,7 @@
 // @namespace    https://netfilm.world/
 // @version      2.5
 // @description  Capture CDN video URLs from netfilm.world and play in a clean overlay player with custom controls and episode switcher
-// @author       moviethon-tools
+// @author       coderfuckingsoft
 // @match        *://netfilm.world/*
 // @match        *://*.netfilm.world/*
 // @run-at       document-start
